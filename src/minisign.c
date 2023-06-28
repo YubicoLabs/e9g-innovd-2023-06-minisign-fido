@@ -11,6 +11,7 @@
 #include <unistd.h>
 
 #include <sodium.h>
+#include <openssl/sha.h>
 
 #include "base64.h"
 #include "get_line.h"
@@ -69,7 +70,7 @@ usage(void)
 }
 
 static unsigned char *
-message_load_hashed(size_t *message_len, const char *message_file)
+message_load_hashed(size_t *message_len, const char *message_file, int fido, FidoSigDataStruct *fido_sig_data_struct)
 {
     crypto_generichash_state hs;
     unsigned char            buf[65536U];
@@ -88,22 +89,36 @@ message_load_hashed(size_t *message_len, const char *message_file)
         exit_err(message_file);
     }
     xfclose(fp);
-    message = xmalloc(crypto_generichash_BYTES_MAX);
-    crypto_generichash_final(&hs, message, crypto_generichash_BYTES_MAX);
-    *message_len = crypto_generichash_BYTES_MAX;
+    if (fido == 0) {
+      message = xmalloc(crypto_generichash_BYTES_MAX);
+      crypto_generichash_final(&hs, message, crypto_generichash_BYTES_MAX);
+      *message_len = crypto_generichash_BYTES_MAX;
+    } else {
+      fprintf(stdout, "About to load FIDO message data\n");
+
+      unsigned char *intermediate_message;
+      intermediate_message = xmalloc(crypto_generichash_BYTES_MAX);
+      crypto_generichash_final(&hs, intermediate_message, crypto_generichash_BYTES_MAX);
+
+      size_t msg_len = (sizeof *fido_sig_data_struct) + SHA256_DIGEST_LENGTH;
+      message = xmalloc(msg_len);
+      memcpy(message, fido_sig_data_struct, sizeof *fido_sig_data_struct);
+      SHA256(intermediate_message, crypto_generichash_BYTES_MAX, message + sizeof *fido_sig_data_struct);
+      *message_len = msg_len;
+    }
 
     return message;
 }
 
 static unsigned char *
-message_load(size_t *message_len, const char *message_file, int hashed)
+message_load(size_t *message_len, const char *message_file, int hashed, int fido, FidoSigDataStruct *fido_sig_data_struct)
 {
     FILE          *fp;
     unsigned char *message;
     off_t          message_len_;
 
     if (hashed != 0) {
-        return message_load_hashed(message_len, message_file);
+        return message_load_hashed(message_len, message_file, fido, fido_sig_data_struct);
     }
     if ((fp = fopen(message_file, "rb")) == NULL || fseeko(fp, 0, SEEK_END) != 0 ||
         (message_len_ = ftello(fp)) == (off_t) -1) {
@@ -147,8 +162,8 @@ output_file(const char *message_file)
 }
 
 static SigStruct *
-sig_load(const char *sig_file, unsigned char global_sig[crypto_sign_BYTES], int *hashed,
-         char trusted_comment[TRUSTEDCOMMENTMAXBYTES], size_t trusted_comment_maxlen)
+sig_load(const char *sig_file, unsigned char global_sig[crypto_sign_BYTES], int *hashed, int *fido,
+         char trusted_comment[TRUSTEDCOMMENTMAXBYTES], size_t trusted_comment_maxlen, FidoSigDataStruct **fido_sig_data_struct, FidoSigDataStruct **fido_global_sig_data_struct)
 {
     char       comment[COMMENTMAXBYTES];
     SigStruct *sig_struct;
@@ -159,6 +174,9 @@ sig_load(const char *sig_file, unsigned char global_sig[crypto_sign_BYTES], int 
     size_t     global_sig_s_size;
     size_t     sig_s_size;
     size_t     sig_struct_len;
+    char      *sig_buf;
+    size_t     sig_buf_len;
+    char      *global_sig_buf;
 
     if ((fp = fopen(sig_file, "r")) == NULL) {
         exit_err(sig_file);
@@ -174,7 +192,7 @@ sig_load(const char *sig_file, unsigned char global_sig[crypto_sign_BYTES], int 
             "Untrusted signature comment should start with "
             "\"" COMMENT_PREFIX "\"");
     }
-    sig_s_size = B64_MAX_LEN_FROM_BIN_LEN(sizeof *sig_struct) + 2U;
+    sig_s_size = B64_MAX_LEN_FROM_BIN_LEN(sizeof *sig_struct + sizeof **fido_sig_data_struct) + 2U;
     sig_s      = xmalloc(sig_s_size);
     if (fgets(sig_s, (int) sig_s_size, fp) == NULL) {
         exit_msg("Error while reading the signature file");
@@ -197,7 +215,7 @@ sig_load(const char *sig_file, unsigned char global_sig[crypto_sign_BYTES], int 
     if (trim(trusted_comment) == 0) {
         exit_msg("Trusted comment too long");
     }
-    global_sig_s_size = B64_MAX_LEN_FROM_BIN_LEN(crypto_sign_BYTES) + 2U;
+    global_sig_s_size = B64_MAX_LEN_FROM_BIN_LEN(crypto_sign_BYTES + sizeof **fido_global_sig_data_struct) + 2U;
     global_sig_s      = xmalloc(global_sig_s_size);
     if (fgets(global_sig_s, (int) global_sig_s_size, fp) == NULL) {
         exit_msg("Error while reading the signature file");
@@ -205,26 +223,80 @@ sig_load(const char *sig_file, unsigned char global_sig[crypto_sign_BYTES], int 
     trim(global_sig_s);
     xfclose(fp);
 
-    sig_struct = xmalloc(sizeof *sig_struct);
-    if (b64_to_bin((unsigned char *) (void *) sig_struct, sig_s, sizeof *sig_struct, strlen(sig_s),
+    sig_buf = xmalloc(sizeof *sig_struct + sizeof **fido_sig_data_struct);
+    if (b64_to_bin((unsigned char *) (void *) sig_buf, sig_s, sizeof *sig_struct + sizeof **fido_sig_data_struct, strlen(sig_s),
                    &sig_struct_len) == NULL ||
-        sig_struct_len != sizeof *sig_struct) {
+        !((sig_struct_len == sizeof *sig_struct)
+          || (sig_struct_len == (sizeof *sig_struct + sizeof **fido_sig_data_struct))
+          )
+    ) {
         exit_msg("base64 conversion failed - was an actual signature given?");
     }
     free(sig_s);
+
+    sig_struct = xmalloc(sizeof *sig_struct);
+    memcpy(sig_struct, sig_buf, sizeof *sig_struct);
+
     if (memcmp(sig_struct->sig_alg, SIGALG, sizeof sig_struct->sig_alg) == 0) {
         *hashed = 0;
     } else if (memcmp(sig_struct->sig_alg, SIGALG_HASHED, sizeof sig_struct->sig_alg) == 0) {
         *hashed = 1;
+    } else if (memcmp(sig_struct->sig_alg, SIGALG_FIDO, sizeof sig_struct->sig_alg) == 0) {
+        *hashed = 1;
+        *fido = 1;
     } else {
         exit_msg("Unsupported signature algorithm");
     }
-    if (b64_to_bin(global_sig, global_sig_s, crypto_sign_BYTES, strlen(global_sig_s),
+
+    if (!(
+          (*fido == 0 && (sig_struct_len == sizeof *sig_struct))
+          || (*fido == 1 && sig_struct_len == (sizeof *sig_struct + sizeof **fido_sig_data_struct))
+          )) {
+        exit_msg("base64 conversion failed - was an actual signature given?4");
+    }
+
+
+    if (*fido == 1) {
+      fprintf(stdout, "About to load FIDO data\n");
+
+      *fido_sig_data_struct = xmalloc(sizeof **fido_sig_data_struct);
+      memcpy(*fido_sig_data_struct, sig_buf + sizeof *sig_struct, sizeof **fido_sig_data_struct);
+
+      fprintf(
+              stdout,
+              "Loaded FIDO data: %08x  Flags: %02x, Counter: %02x%02x%02x%02x\n",
+              *fido_sig_data_struct,
+              (* fido_sig_data_struct )->flags[0],
+              ( *fido_sig_data_struct )->counter[0],
+              ( *fido_sig_data_struct )->counter[1],
+              ( *fido_sig_data_struct )->counter[2],
+              ( *fido_sig_data_struct )->counter[3]
+              );
+    }
+    free(sig_buf);
+
+    global_sig_buf = xmalloc(crypto_sign_BYTES + sizeof **fido_global_sig_data_struct);
+    if (b64_to_bin(global_sig_buf, global_sig_s, crypto_sign_BYTES + sizeof **fido_global_sig_data_struct, strlen(global_sig_s),
                    &global_sig_len) == NULL ||
-        global_sig_len != crypto_sign_BYTES) {
-        exit_msg("base64 conversion failed - was an actual signature given?");
+        !(global_sig_len == crypto_sign_BYTES
+         || global_sig_len == (crypto_sign_BYTES + sizeof **fido_global_sig_data_struct))
+    ) {
+      fprintf(
+              stdout,
+              "global_sig_len: %d ; %d ; %d\n",
+              global_sig_len,
+              crypto_sign_BYTES,
+              crypto_sign_BYTES + sizeof **fido_global_sig_data_struct
+              );
+        exit_msg("base64 conversion failed - was an actual signature given?5");
+    }
+    memcpy(global_sig, global_sig_buf, crypto_sign_BYTES);
+    if (*fido == 1) {
+      *fido_global_sig_data_struct = xmalloc(sizeof **fido_global_sig_data_struct);
+      memcpy(*fido_global_sig_data_struct, global_sig_buf + crypto_sign_BYTES, sizeof **fido_global_sig_data_struct);
     }
     free(global_sig_s);
+    free(global_sig_buf);
 
     return sig_struct;
 }
@@ -241,7 +313,9 @@ pubkey_load_string(const char *pubkey_s)
         pubkey_struct_len != sizeof *pubkey_struct) {
         exit_msg("base64 conversion failed - was an actual public key given?");
     }
-    if (memcmp(pubkey_struct->sig_alg, SIGALG, sizeof pubkey_struct->sig_alg) != 0) {
+    if (memcmp(pubkey_struct->sig_alg, SIGALG, sizeof pubkey_struct->sig_alg) != 0
+        && memcmp(pubkey_struct->sig_alg, SIGALG_FIDO, sizeof pubkey_struct->sig_alg) != 0
+    ) {
         exit_msg("Unsupported signature algorithm");
     }
     return pubkey_struct;
@@ -446,18 +520,44 @@ verify(PubkeyStruct *pubkey_struct, const char *message_file, const char *sig_fi
     size_t         message_len;
     size_t         trusted_comment_len;
     int            hashed;
+    int            fido = 0;
+    FidoSigDataStruct *fido_sig_data_struct;
+    FidoSigDataStruct *fido_global_sig_data_struct;
 
     if (output != 0) {
         info_fp = stderr;
     }
-    sig_struct = sig_load(sig_file, global_sig, &hashed, trusted_comment, sizeof trusted_comment);
+    fprintf(info_fp,
+            "About to load signature file\n");
+    sig_struct = sig_load(sig_file, global_sig, &hashed, &fido, trusted_comment, sizeof trusted_comment, &fido_sig_data_struct, &fido_global_sig_data_struct);
+    fprintf(info_fp,
+            "Loaded signature file\n"
+            "FIDO: %d\n",
+            fido);
+
     if (hashed == 0 && allow_legacy == 0) {
         if (quiet == 0) {
             fprintf(stderr, "Legacy (non-prehashed) signature found\n");
         }
         exit(1);
     }
-    message = message_load(&message_len, message_file, hashed);
+    fprintf(info_fp, "About to load message\n");
+    if (fido == 1) {
+      fprintf(
+              stdout,
+              "FIDO: %d; fido_sig_data_struct: %08x\n", fido, fido_sig_data_struct);
+      fprintf(
+              stdout,
+              "FIDO data: Flags: %02x, Counter: %02x%02x%02x%02x\n",
+              fido_sig_data_struct->flags[0],
+              fido_sig_data_struct->counter[0],
+              fido_sig_data_struct->counter[1],
+              fido_sig_data_struct->counter[2],
+              fido_sig_data_struct->counter[3]
+              );
+    }
+    message = message_load(&message_len, message_file, hashed, fido, fido_sig_data_struct);
+    fprintf(info_fp, "Loaded message\n");
     if (memcmp(sig_struct->keynum, pubkey_struct->keynum_pk.keynum, sizeof sig_struct->keynum) !=
         0) {
         fprintf(stderr,
@@ -468,6 +568,7 @@ verify(PubkeyStruct *pubkey_struct, const char *message_file, const char *sig_fi
                 le64_load(pubkey_struct->keynum_pk.keynum));
         exit(1);
     }
+
     if (crypto_sign_verify_detached(sig_struct->sig, message, message_len,
                                     pubkey_struct->keynum_pk.pk) != 0) {
         if (quiet == 0) {
@@ -478,11 +579,24 @@ verify(PubkeyStruct *pubkey_struct, const char *message_file, const char *sig_fi
     free(message);
 
     trusted_comment_len     = strlen(trusted_comment);
-    sig_and_trusted_comment = xmalloc((sizeof sig_struct->sig) + trusted_comment_len);
+    size_t global_sig_signed_len = (sizeof sig_struct->sig) + trusted_comment_len;
+    sig_and_trusted_comment = xmalloc(global_sig_signed_len);
     memcpy(sig_and_trusted_comment, sig_struct->sig, sizeof sig_struct->sig);
     memcpy(sig_and_trusted_comment + sizeof sig_struct->sig, trusted_comment, trusted_comment_len);
+
+    if (fido == 1) {
+      size_t fido_signed_len = (sizeof *fido_global_sig_data_struct) + SHA256_DIGEST_LENGTH;
+      unsigned char *tmp_buf = xmalloc(fido_signed_len);
+      memcpy(tmp_buf, fido_global_sig_data_struct, sizeof *fido_global_sig_data_struct);
+      SHA256(sig_and_trusted_comment, global_sig_signed_len, tmp_buf + sizeof *fido_global_sig_data_struct);
+
+      free(sig_and_trusted_comment);
+      sig_and_trusted_comment = tmp_buf;
+      global_sig_signed_len = fido_signed_len;
+    }
+
     if (crypto_sign_verify_detached(global_sig, sig_and_trusted_comment,
-                                    (sizeof sig_struct->sig) + trusted_comment_len,
+                                    global_sig_signed_len,
                                     pubkey_struct->keynum_pk.pk) != 0) {
         if (quiet == 0) {
             fprintf(stderr, "Comment signature verification failed\n");
@@ -556,7 +670,7 @@ sign(SeckeyStruct *seckey_struct, PubkeyStruct *pubkey_struct, const char *messa
         tmp_trusted_comment = default_trusted_comment(message_file, hashed);
         trusted_comment     = tmp_trusted_comment;
     }
-    message = message_load(&message_len, message_file, hashed);
+    message = message_load(&message_len, message_file, hashed, 0, NULL);
     memcpy(sig_struct.sig_alg, hashed ? SIGALG_HASHED : SIGALG, sizeof sig_struct.sig_alg);
     memcpy(sig_struct.keynum, seckey_struct->keynum_sk.keynum, sizeof sig_struct.keynum);
     crypto_sign_detached(sig_struct.sig, NULL, message, message_len, seckey_struct->keynum_sk.sk);

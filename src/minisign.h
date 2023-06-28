@@ -8,6 +8,7 @@
 #define TRUSTEDCOMMENTMAXBYTES         8192
 #define SIGALG                         "Ed"
 #define SIGALG_HASHED                  "ED"
+#define SIGALG_FIDO                    "FD"
 #define KDFALG                         "Sc"
 #define KDFNONE                        "\0\0"
 #define CHKALG                         "B2"
@@ -53,6 +54,12 @@ typedef struct SigStruct_ {
     unsigned char keynum[KEYNUMBYTES];
     unsigned char sig[crypto_sign_BYTES];
 } SigStruct;
+
+typedef struct FidoSigDataStruct_ {
+  unsigned char rpid_hash[32];
+  unsigned char flags[1];
+  unsigned char counter[4];
+} FidoSigDataStruct;
 
 typedef enum Action_ {
     ACTION_NONE,
