@@ -94,8 +94,6 @@ message_load_hashed(size_t *message_len, const char *message_file, int fido, Fid
       crypto_generichash_final(&hs, message, crypto_generichash_BYTES_MAX);
       *message_len = crypto_generichash_BYTES_MAX;
     } else {
-      fprintf(stdout, "About to load FIDO message data\n");
-
       unsigned char *intermediate_message;
       intermediate_message = xmalloc(crypto_generichash_BYTES_MAX);
       crypto_generichash_final(&hs, intermediate_message, crypto_generichash_BYTES_MAX);
@@ -257,21 +255,8 @@ sig_load(const char *sig_file, unsigned char global_sig[crypto_sign_BYTES], int 
 
 
     if (*fido == 1) {
-      fprintf(stdout, "About to load FIDO data\n");
-
       *fido_sig_data_struct = xmalloc(sizeof **fido_sig_data_struct);
       memcpy(*fido_sig_data_struct, sig_buf + sizeof *sig_struct, sizeof **fido_sig_data_struct);
-
-      fprintf(
-              stdout,
-              "Loaded FIDO data: %08x  Flags: %02x, Counter: %02x%02x%02x%02x\n",
-              *fido_sig_data_struct,
-              (* fido_sig_data_struct )->flags[0],
-              ( *fido_sig_data_struct )->counter[0],
-              ( *fido_sig_data_struct )->counter[1],
-              ( *fido_sig_data_struct )->counter[2],
-              ( *fido_sig_data_struct )->counter[3]
-              );
     }
     free(sig_buf);
 
@@ -281,13 +266,6 @@ sig_load(const char *sig_file, unsigned char global_sig[crypto_sign_BYTES], int 
         !(global_sig_len == crypto_sign_BYTES
          || global_sig_len == (crypto_sign_BYTES + sizeof **fido_global_sig_data_struct))
     ) {
-      fprintf(
-              stdout,
-              "global_sig_len: %d ; %d ; %d\n",
-              global_sig_len,
-              crypto_sign_BYTES,
-              crypto_sign_BYTES + sizeof **fido_global_sig_data_struct
-              );
         exit_msg("base64 conversion failed - was an actual signature given?5");
     }
     memcpy(global_sig, global_sig_buf, crypto_sign_BYTES);
@@ -527,13 +505,7 @@ verify(PubkeyStruct *pubkey_struct, const char *message_file, const char *sig_fi
     if (output != 0) {
         info_fp = stderr;
     }
-    fprintf(info_fp,
-            "About to load signature file\n");
     sig_struct = sig_load(sig_file, global_sig, &hashed, &fido, trusted_comment, sizeof trusted_comment, &fido_sig_data_struct, &fido_global_sig_data_struct);
-    fprintf(info_fp,
-            "Loaded signature file\n"
-            "FIDO: %d\n",
-            fido);
 
     if (hashed == 0 && allow_legacy == 0) {
         if (quiet == 0) {
@@ -541,23 +513,7 @@ verify(PubkeyStruct *pubkey_struct, const char *message_file, const char *sig_fi
         }
         exit(1);
     }
-    fprintf(info_fp, "About to load message\n");
-    if (fido == 1) {
-      fprintf(
-              stdout,
-              "FIDO: %d; fido_sig_data_struct: %08x\n", fido, fido_sig_data_struct);
-      fprintf(
-              stdout,
-              "FIDO data: Flags: %02x, Counter: %02x%02x%02x%02x\n",
-              fido_sig_data_struct->flags[0],
-              fido_sig_data_struct->counter[0],
-              fido_sig_data_struct->counter[1],
-              fido_sig_data_struct->counter[2],
-              fido_sig_data_struct->counter[3]
-              );
-    }
     message = message_load(&message_len, message_file, hashed, fido, fido_sig_data_struct);
-    fprintf(info_fp, "Loaded message\n");
     if (memcmp(sig_struct->keynum, pubkey_struct->keynum_pk.keynum, sizeof sig_struct->keynum) !=
         0) {
         fprintf(stderr,
