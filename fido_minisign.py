@@ -37,13 +37,13 @@ def usage_exit(msg: str, status: int = 1):
 # Handle user interaction
 class CliInteraction(UserInteraction):
     def prompt_up(self):
-        print("\nTouch your authenticator device now...\n")
+        print("\nTouch your authenticator device now...\n", file=sys.stderr)
 
     def request_pin(self, permissions, rd_id):
         return getpass("Enter PIN: ")
 
     def request_uv(self, permissions, rd_id):
-        print("User Verification required.")
+        print("User Verification required.", file=sys.stderr)
         return True
 
 
@@ -53,16 +53,13 @@ def get_device():
     else:
         # Locate a device
         dev = next(CtapHidDevice.list_devices(), None)
-        if dev is not None:
-            print("Using USB HID channel.")
-        else:
+        if dev is None:
             try:
                 from fido2.pcsc import CtapPcscDevice
 
                 dev = next(CtapPcscDevice.list_devices(), None)
-                print("Using NFC channel.")
             except Exception as e:
-                print("NFC channel search error:", e)
+                print("NFC channel search error:", e, file=sys.stderr)
 
         if not dev:
             err_exit("No FIDO device found.")
@@ -329,15 +326,11 @@ def generate_key(
         print(f"Successfully wrote private key handle to: {prikey_outfile}")
 
 
-def sign_file(
-        data_file: str,
+def sign_data(
+        data: bytes,
+        file_name: str,
         prikey_file: str,
-        sig_outfile: Optional[str],
 ):
-    sig_outfile = sig_outfile or data_file + '.minisig'
-    if os.path.exists(sig_outfile):
-        err_exit(f"File already exists: {sig_outfile}")
-
     with open(prikey_file, "rb") as f:
         prikey_contents = json.load(f)
     if not "minisign" in prikey_contents and "fido" in prikey_contents:
@@ -348,24 +341,45 @@ def sign_file(
     credential_id = base64.b64decode(prikey_contents["fido"]["credential_id"])
     timestamp = int(datetime.datetime.now().timestamp())
 
-    with open(data_file, "rb") as f:
-        data = f.read()
-
-    print(f"Signing data with FIDO key...")
-
-    minisig = make_minisig_signature(
+    return make_minisig_signature(
         b'FD',
         key_id,
         rp_id,
         credential_id,
         data,
         untrusted_comment="signature from minisign FIDO key",
-        trusted_comment=f"timestamp: {timestamp}\tfile:{data_file}\thashed",
-    )
+        trusted_comment=f"timestamp: {timestamp}\tfile:{file_name}\thashed",
+    ).encode('utf-8')
 
-    with open(sig_outfile, 'wb') as f:
-        f.write(minisig.encode('utf-8'))
-        print(f"Successfully wrote signature to: {sig_outfile}")
+
+def sign_file(
+        data_file: Optional[str],
+        prikey_file: str,
+        sig_outfile: Optional[str],
+):
+    data_file = data_file or "-"
+    use_stdin = data_file == "-"
+    use_stdout = use_stdin and (sig_outfile is None)
+
+    if not use_stdout:
+        sig_outfile = sig_outfile or data_file + '.minisig'
+        if os.path.exists(sig_outfile):
+            err_exit(f"File already exists: {sig_outfile}")
+
+    if use_stdin:
+        data = sys.stdin.buffer.read()
+    else:
+        with open(data_file, "rb") as f:
+            data = f.read()
+
+    minisig = sign_data(data, data_file, prikey_file)
+
+    if use_stdout:
+        sys.stdout.buffer.write(minisig)
+    else:
+        with open(sig_outfile, 'wb') as f:
+            f.write(minisig)
+            print(f"Successfully wrote signature to: {sig_outfile}")
 
 
 def print_usage():
@@ -380,14 +394,15 @@ USAGE:
     --rp-id    FIDO RP ID to bind credential to
 
 
-{sys.argv[0]} sign <DATA_FILE> [--key minisign.key] [--sigout <DATA_FILE>.minisig]
+{sys.argv[0]} sign [<DATA_FILE>] [--key minisign.key] [--sigout <DATA_FILE>.minisig]
 
   Arguments:
-    DATA_FILE  File to sign
+    DATA_FILE  File to sign. Omit or use "-" for standard input.
 
   Options:
     --key      File with private key handle
-    --sigout   File to write signature key to
+    --sigout   File to write signature key to. Default is standard output if
+               DATA_FILE is standard input, otherwise <DATA_FILE>.minisig .
 """)
 
 
@@ -438,9 +453,6 @@ def main(argv):
                     argi += 1
                 else:
                     usage_exit(f"Unknown argument: {argv[argi]}")
-
-        if data_file is None:
-            usage_exit("Unspecified data file.")
 
         sign_file(data_file, prikey_file, sig_outfile)
 
