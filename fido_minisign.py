@@ -2,6 +2,8 @@
 
 import base64
 import ctypes
+import datetime
+import json
 import os
 import sys
 
@@ -14,9 +16,22 @@ from fido2.ctap2.pin import ClientPin, PinProtocol
 from fido2.hid import CtapHidDevice
 from fido2.server import Fido2Server
 from fido2.utils import sha256
-from fido2.webauthn import AttestationObject, AuthenticatorAttestationResponse, CredentialCreationOptions
+from fido2.webauthn import AttestationObject, AuthenticatorAttestationResponse, CredentialCreationOptions, UserVerificationRequirement
 from getpass import getpass
 from threading import Event
+from typing import Optional
+
+
+def err_exit(msg: str, status: int = 1):
+    print(msg, file=sys.stderr)
+    sys.exit(status)
+
+
+def usage_exit(msg: str, status: int = 1):
+    print(msg, file=sys.stderr)
+    print()
+    print_usage()
+    sys.exit(status)
 
 
 # Handle user interaction
@@ -32,33 +47,28 @@ class CliInteraction(UserInteraction):
         return True
 
 
-uv = "discouraged"
-
-if WindowsClient.is_available() and not ctypes.windll.shell32.IsUserAnAdmin():
-    raise Exception("TODO")
-else:
-    # Locate a device
-    dev = next(CtapHidDevice.list_devices(), None)
-    if dev is not None:
-        print("Use USB HID channel.")
+def get_device():
+    if WindowsClient.is_available() and not ctypes.windll.shell32.IsUserAnAdmin():
+        raise Exception("TODO")
     else:
-        try:
-            from fido2.pcsc import CtapPcscDevice
+        # Locate a device
+        dev = next(CtapHidDevice.list_devices(), None)
+        if dev is not None:
+            print("Using USB HID channel.")
+        else:
+            try:
+                from fido2.pcsc import CtapPcscDevice
 
-            dev = next(CtapPcscDevice.list_devices(), None)
-            print("Use NFC channel.")
-        except Exception as e:
-            print("NFC channel search error:", e)
+                dev = next(CtapPcscDevice.list_devices(), None)
+                print("Using NFC channel.")
+            except Exception as e:
+                print("NFC channel search error:", e)
 
-    if not dev:
-        print("No FIDO device found")
-        sys.exit(1)
+        if not dev:
+            err_exit("No FIDO device found.")
 
-    #try:
-    ctap = Ctap2(dev)
-    #except ValueError:
-        #ctap = Ctap1(dev)
-        # Can't use ctap1 because minisign requires EdDSA
+        # Can't use ctap1, because minisign only supports EdDSA
+        return dev
 
 
 class RawSignCtap2ClientBackend(_Ctap2ClientBackend):
@@ -96,58 +106,21 @@ class RawSignCtap2ClientBackend(_Ctap2ClientBackend):
         rp,
         user,
         key_params,
-        exclude_list,
-        extensions,
-        rk,
         user_verification,
-        enterprise_attestation,
-        event,
     ):
-        if exclude_list:
-            # Filter out credential IDs which are too long
-            max_len = self.info.max_cred_id_length
-            if max_len:
-                exclude_list = [e for e in exclude_list if len(e) <= max_len]
-
-            # Reject the request if too many credentials remain.
-            max_creds = self.info.max_creds_in_list
-            if max_creds and len(exclude_list) > max_creds:
-                raise ClientError.ERR.BAD_REQUEST("exclude_list too long")
-
-        # Process extensions
-        client_inputs = extensions or {}
-        extension_inputs = {}
-        used_extensions = []
+        options = None
+        exclude_list = None
+        extension_inputs = None
         permissions = ClientPin.PERMISSION(0)
-        try:
-            for ext in [cls(self.ctap2) for cls in self.extensions]:
-                auth_input, req_perms = ext.process_create_input_with_permissions(
-                    client_inputs
-                )
-                if auth_input is not None:
-                    used_extensions.append(ext)
-                    permissions |= req_perms
-                    extension_inputs[ext.NAME] = auth_input
-        except ValueError as e:
-            raise ClientError.ERR.CONFIGURATION_UNSUPPORTED(e)
-
         on_keepalive = _user_keepalive(self.user_interaction)
-
         client_data_hash = sha256(client_data)
+        enterprise_attestation = None
+        event = None
 
         # Handle auth
         pin_protocol, pin_token, pin_auth, internal_uv = self._get_auth_params(
             True, client_data_hash, rp["id"], user_verification, permissions, event, on_keepalive
         )
-
-        if not (rk or internal_uv):
-            options = None
-        else:
-            options = {}
-            if rk:
-                options["rk"] = True
-            if internal_uv:
-                options["uv"] = True
 
         att_obj = self.ctap2.make_credential(
             client_data_hash,
@@ -164,30 +137,18 @@ class RawSignCtap2ClientBackend(_Ctap2ClientBackend):
             on_keepalive=on_keepalive,
         )
 
-        # Process extenstion outputs
-        extension_outputs = {}
-        try:
-            for ext in used_extensions:
-                output = ext.process_create_output(att_obj, pin_token, pin_protocol)
-                if output is not None:
-                    extension_outputs.update(output)
-        except ValueError as e:
-            raise ClientError.ERR.CONFIGURATION_UNSUPPORTED(e)
-
         return (
             client_data,
             AttestationObject.create(att_obj.fmt, att_obj.auth_data, att_obj.att_stmt),
-            extension_outputs,
         )
 
     def do_get_assertion(
-        self,
-        client_data,
-        rp_id,
-        allow_list,
-        extensions,
-        user_verification,
-        event,
+            self,
+            client_data,
+            rp_id,
+            allow_list,
+            user_verification,
+            user_presence,
     ):
         if allow_list:
             # Filter out credential IDs which are too long
@@ -202,31 +163,18 @@ class RawSignCtap2ClientBackend(_Ctap2ClientBackend):
             if max_creds and len(allow_list) > max_creds:
                 raise ClientError.ERR.BAD_REQUEST("allow_list too long")
 
-        # Process extensions
-        client_inputs = extensions or {}
-        extension_inputs = {}
+        extension_inputs = None
         used_extensions = []
         permissions = ClientPin.PERMISSION(0)
-        try:
-            for ext in [cls(self.ctap2) for cls in self.extensions]:
-                auth_input, req_perms = ext.process_get_input_with_permissions(
-                    client_inputs
-                )
-                if auth_input is not None:
-                    used_extensions.append(ext)
-                    permissions |= req_perms
-                    extension_inputs[ext.NAME] = auth_input
-        except ValueError as e:
-            raise ClientError.ERR.CONFIGURATION_UNSUPPORTED(e)
-
         on_keepalive = _user_keepalive(self.user_interaction)
+        event = None
 
         client_data_hash = sha256(client_data)
 
         pin_protocol, pin_token, pin_auth, internal_uv = self._get_auth_params(
             False, client_data_hash, rp_id, user_verification, permissions, event, on_keepalive
         )
-        options = {"uv": True} if internal_uv else None
+        options = {"up": user_presence}
 
         assertions = self.ctap2.get_assertions(
             rp_id,
@@ -249,48 +197,9 @@ class RawSignCtap2ClientBackend(_Ctap2ClientBackend):
         )
 
 
-client_data = b'DATA TO SIGN'
-rp = {"id": "example.com", "name": "Example RP"}
-user = {"id": b"user_id", "name": "A. User"}
-key_params = [{'type':'public-key', 'alg': -8}]
-exclude_list = []
-extensions = {}
-rk = False
-user_verification = "discouraged"
-enterprise_attestation = None
-event = None
-
-client = RawSignCtap2ClientBackend(dev, CliInteraction(), [])
-
-registration_client_data, att_obj, registration_extension_outputs = client.do_make_credential(
-    client_data,
-    rp,
-    user,
-    key_params,
-    exclude_list,
-    extensions,
-    rk,
-    user_verification,
-    enterprise_attestation,
-    event,
-)
-
-# assertions = client.do_get_assertion(
-#     client_data,
-#     rp["id"],
-#     [{"type": "public-key", "id": att_obj.auth_data.credential_data.credential_id}],
-#     {},
-#     "discouraged",
-#     event
-# )
-
-# assertion = assertions.get_assertions()[0]
-# auth_data = assertion.auth_data
-# sig = assertion.signature
-
-key_id = os.urandom(8)
-
-
+def get_client():
+    dev = get_device()
+    return RawSignCtap2ClientBackend(dev, CliInteraction(), [])
 
 
 def blakehash(data: bytes) -> bytes:
@@ -315,18 +224,22 @@ def make_minisig_pubkey(
 def make_minisig_signature(
         signature_algorithm: bytes,
         key_id: bytes,
+        rp_id: str,
+        credential_id: bytes,
         file_contents: bytes,
         untrusted_comment: str = "",
         trusted_comment: str = "",
 ) -> bytes:
     signature_client_data = blakehash(file_contents)
+    allow_credentials = [{"type": "public-key", "id": credential_id}]
+    client = get_client()
+
     assertion = client.do_get_assertion(
         signature_client_data,
-        rp["id"],
-        [{"type": "public-key", "id": att_obj.auth_data.credential_data.credential_id}],
-        {},
-        "discouraged",
-        event
+        rp_id,
+        allow_credentials,
+        UserVerificationRequirement.DISCOURAGED,
+        True,
     ).get_assertions()[0]
     signature = assertion.signature
     auth_data = assertion.auth_data
@@ -334,11 +247,10 @@ def make_minisig_signature(
     global_signature_client_data = signature + trusted_comment.encode('utf-8')
     global_assertion = client.do_get_assertion(
         global_signature_client_data,
-        rp["id"],
-        [{"type": "public-key", "id": att_obj.auth_data.credential_data.credential_id}],
-        {},
-        "discouraged",
-        event
+        rp_id,
+        allow_credentials,
+        UserVerificationRequirement.DISCOURAGED,
+        False,
     ).get_assertions()[0]
     global_signature = global_assertion.signature
     global_auth_data = global_assertion.auth_data
@@ -352,23 +264,189 @@ def make_minisig_signature(
     ])
 
 
-with open('fido-key.pub', 'wb') as f:
+def generate_key(
+        pubkey_outfile: str,
+        prikey_outfile: str,
+        rp_id: str,
+):
+    if os.path.exists(pubkey_outfile):
+        err_exit(f"File already exists: {pubkey_outfile}")
+
+    if os.path.exists(prikey_outfile):
+        err_exit(f"File already exists: {prikey_outfile}")
+
+    key_id = os.urandom(8)
+    key_id_base64 = base64.b64encode(key_id).decode('utf-8')
+
+    client_data = json.dumps({
+        "type": "minisign.create",
+        "challenge": base64.b64encode(os.urandom(64)).decode('utf-8'),
+        "minisign_key_id": key_id_base64,
+    }).encode('utf-8')
+
+    rp = {"id": rp_id, "name": ""}  # name is irrelevant for non-resident keys
+    user = {"id": key_id, "name": key_id_base64, "displayName": key_id_base64}  # Irrelevant for non-resident keys
+    key_params = [{"type": "public-key", "alg": -8}]  # minisign only supports Ed25519
+    user_verification = UserVerificationRequirement.DISCOURAGED
+
+    client = get_client()
+
+    print("Creating FIDO credential...")
+
+    registration_client_data, att_obj = client.do_make_credential(
+        client_data,
+        rp,
+        user,
+        key_params,
+        user_verification,
+    )
+
     minisig_pub = make_minisig_pubkey(
-        b'FD',
+        b"FD",
         key_id,
         att_obj.auth_data.credential_data.public_key[-2],
-        untrusted_comment="minisign FIDO key",
+        untrusted_comment=f"minisign public key {key_id.hex()}",
     )
-    f.write(minisig_pub.encode('utf-8'))
 
-with open('fido-msg.txt', 'rb') as f:
+    prikey_contents = json.dumps({
+        "minisign": {
+            "key_id": base64.b64encode(key_id).decode('utf-8'),
+        },
+        "fido": {
+            "rp_id": rp_id,
+            "credential_id": base64.b64encode(att_obj.auth_data.credential_data.credential_id).decode('utf-8'),
+            "client_data": base64.b64encode(client_data).decode('utf-8'),
+            "attestation_object": base64.b64encode(att_obj).decode('utf-8'),
+        },
+    })
+
+    with open(pubkey_outfile, "wb") as f:
+        f.write(minisig_pub.encode('utf-8'))
+        print(f"Successfully wrote public key to: {pubkey_outfile}")
+
+    with open(prikey_outfile, "wb") as f:
+        f.write(prikey_contents.encode('utf-8'))
+        print(f"Successfully wrote private key handle to: {prikey_outfile}")
+
+
+def sign_file(
+        data_file: str,
+        prikey_file: str,
+        sig_outfile: Optional[str],
+):
+    sig_outfile = sig_outfile or data_file + '.minisig'
+    if os.path.exists(sig_outfile):
+        err_exit(f"File already exists: {sig_outfile}")
+
+    with open(prikey_file, "rb") as f:
+        prikey_contents = json.load(f)
+    if not "minisign" in prikey_contents and "fido" in prikey_contents:
+        err_exit("Malformed private key handle file.")
+
+    key_id = base64.b64decode(prikey_contents["minisign"]["key_id"])
+    rp_id = prikey_contents["fido"]["rp_id"]
+    credential_id = base64.b64decode(prikey_contents["fido"]["credential_id"])
+    timestamp = int(datetime.datetime.now().timestamp())
+
+    with open(data_file, "rb") as f:
+        data = f.read()
+
+    print(f"Signing data with FIDO key...")
+
     minisig = make_minisig_signature(
         b'FD',
         key_id,
-        f.read(),
+        rp_id,
+        credential_id,
+        data,
         untrusted_comment="signature from minisign FIDO key",
-        trusted_comment="hashed",
+        trusted_comment=f"timestamp: {timestamp}\tfile:{data_file}\thashed",
     )
 
-with open('fido-msg.txt.minisigfido', 'wb') as f:
-    f.write(minisig.encode('utf-8'))
+    with open(sig_outfile, 'wb') as f:
+        f.write(minisig.encode('utf-8'))
+        print(f"Successfully wrote signature to: {sig_outfile}")
+
+
+def print_usage():
+    print(f"""
+USAGE:
+
+{sys.argv[0]} generate [--priout minisign.key] [--pubout minisign.pub] [--rp-id minisign:]
+
+  Options:
+    --priout   File to write private key handle to
+    --pubout   File to write public key to
+    --rp-id    FIDO RP ID to bind credential to
+
+
+{sys.argv[0]} sign <DATA_FILE> [--key minisign.key] [--sigout <DATA_FILE>.minisig]
+
+  Arguments:
+    DATA_FILE  File to sign
+
+  Options:
+    --key      File with private key handle
+    --sigout   File to write signature key to
+""")
+
+
+def main(argv):
+    if len(argv) < 2:
+        print_usage()
+        sys.exit(1)
+
+    cmd = argv[1]
+
+    if cmd == "generate":
+        pubkey_outfile: str = "minisign.pub"
+        prikey_outfile: str = "minisign.key"
+        rp_id: str = "minisign:"
+
+        argi = 2
+        while argi < len(argv):
+            if argv[argi] == "--pubout":
+                pubkey_outfile = argv[argi+1]
+                argi += 2
+            elif argv[argi] == "--priout":
+                prikey_outfile = argv[argi+1]
+                argi += 2
+            elif argv[argi] == "--rp-id":
+                rp_id = argv[argi+1]
+                argi += 2
+            else:
+                usage_exit(f"Unknown option: {argv[argi]}")
+
+        generate_key(pubkey_outfile, prikey_outfile, rp_id)
+
+    elif cmd == "sign":
+        data_file: Optional[str] = None
+        prikey_file: str = "minisign.key"
+        sig_outfile: Optional[str] = None
+
+        argi = 2
+        while argi < len(argv):
+            if argv[argi] == "--key":
+                prikey_file = argv[argi+1]
+                argi += 2
+            elif argv[argi] == "--sigout":
+                sig_outfile = argv[argi+1]
+                argi += 2
+            else:
+                if data_file is None:
+                    data_file = argv[argi]
+                    argi += 1
+                else:
+                    usage_exit(f"Unknown argument: {argv[argi]}")
+
+        if data_file is None:
+            usage_exit("Unspecified data file.")
+
+        sign_file(data_file, prikey_file, sig_outfile)
+
+    else:
+        usage_exit(f"Unknown command: {cmd}")
+
+
+if __name__ == "__main__":
+    main(sys.argv)
