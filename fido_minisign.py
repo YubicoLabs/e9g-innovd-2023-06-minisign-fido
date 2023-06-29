@@ -199,9 +199,12 @@ def get_client():
     return RawSignCtap2ClientBackend(dev, CliInteraction(), [])
 
 
-def blakehash(data: bytes) -> bytes:
+def blakehash(data_stream) -> bytes:
     h = hashes.Hash(hashes.BLAKE2b(64), default_backend())
-    h.update(data)
+    data = data_stream.read(1024)
+    while data:
+        h.update(data)
+        data = data_stream.read(1024)
     return h.finalize()
 
 
@@ -223,11 +226,11 @@ def make_minisig_signature(
         key_id: bytes,
         rp_id: str,
         credential_id: bytes,
-        file_contents: bytes,
+        file_hash: bytes,
         untrusted_comment: str = "",
         trusted_comment: str = "",
 ) -> bytes:
-    signature_client_data = blakehash(file_contents)
+    signature_client_data = file_hash
     allow_credentials = [{"type": "public-key", "id": credential_id}]
     client = get_client()
 
@@ -327,7 +330,7 @@ def generate_key(
 
 
 def sign_data(
-        data: bytes,
+        data_hash: bytes,
         file_name: str,
         prikey_file: str,
 ):
@@ -346,7 +349,7 @@ def sign_data(
         key_id,
         rp_id,
         credential_id,
-        data,
+        data_hash,
         untrusted_comment="signature from minisign FIDO key",
         trusted_comment=f"timestamp: {timestamp}\tfile:{file_name}\thashed",
     ).encode('utf-8')
@@ -367,12 +370,12 @@ def sign_file(
             err_exit(f"File already exists: {sig_outfile}")
 
     if use_stdin:
-        data = sys.stdin.buffer.read()
+        file_hash = blakehash(sys.stdin.buffer)
     else:
         with open(data_file, "rb") as f:
-            data = f.read()
+            file_hash = blakehash(f)
 
-    minisig = sign_data(data, data_file, prikey_file)
+    minisig = sign_data(file_hash, data_file, prikey_file)
 
     if use_stdout:
         sys.stdout.buffer.write(minisig)
