@@ -182,8 +182,13 @@ $ make
 
     <h2>
       <a id="signature-format" class="anchor" href="#signature-format" aria-hidden="true"><span
-          class="octicon octicon-link"></span></a>Signature format
+          class="octicon octicon-link"></span></a>Signature formats
     </h2>
+
+    <h3>
+      <a id="signature-format-Ed-ED" class="anchor" href="#signature-format-Ed-ED" aria-hidden="true"><span
+          class="octicon octicon-link"></span></a><code>Ed</code> (legacy) and <code>ED</code> (prehashed)
+    </h3>
 
     <pre><code>untrusted comment: &lt;arbitrary text&gt;
 base64(&lt;signature_algorithm&gt; || &lt;key_id&gt; || &lt;signature&gt;)
@@ -211,6 +216,46 @@ base64(&lt;global_signature&gt;)
 
     <p>New implementations must use the hashed signature format; support for the legacy one is optional and should not
       be done by default.</p>
+
+    <h3>
+      <a id="signature-format-FD" class="anchor" href="#signature-format-FD" aria-hidden="true"><span
+          class="octicon octicon-link"></span></a><code>FD</code> (FIDO)
+    </h3>
+
+    <p>This signature format is compatible with FIDO CTAP2 security keys. CTAP1 (U2F) security keys are not compatible
+      because they only support ECDSA.</p>
+
+    <p>Minisign currently only implements verification of <code>FD</code> signatures. Key generation and signing can be
+      done by external tools. Note that public keys still use the <code>Ed</code> key type and public key format.</p>
+
+    <pre><code>untrusted comment: &lt;arbitrary text&gt;
+base64(&lt;signature_algorithm&gt; || &lt;key_id&gt; || &lt;signature&gt; || &lt;auth_data&gt;)
+trusted_comment: &lt;arbitrary text&gt;
+base64(&lt;global_signature&gt; || &lt;auth_data_global&gt;)
+</code></pre>
+
+    <ul>
+      <li>
+        <code>signature_algorithm</code>: <code>FD</code>
+      </li>
+      <li>
+        <code>key_id</code>: 8 random bytes, matching the public key
+      </li>
+      <li>
+        <code>signature</code>: <code>ed25519(auth_data || SHA256(Blake2b-512(&lt;file data&gt;)))</code>
+      </li>
+      <li>
+        <code>auth_data</code>: FIDO <a href="https://www.w3.org/TR/2021/REC-webauthn-2-20210408/#sctn-authenticator-data">
+          authenticator data</a> for <code>signature</code>
+      </li>
+      <li>
+        <code>global_signature</code>: <code>ed25519(auth_data_global || SHA256(&lt;signature&gt; || &lt;trusted_comment&gt;))</code>
+      </li>
+      <li>
+        <code>global_auth_data</code>: FIDO <a href="https://www.w3.org/TR/2021/REC-webauthn-2-20210408/#sctn-authenticator-data">
+          authenticator data</a> for <code>global_signature</code>
+      </li>
+    </ul>
 
     <h2>
       <a id="public-key-format" class="anchor" href="#public-key-format" aria-hidden="true"><span

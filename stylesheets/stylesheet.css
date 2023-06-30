@@ -122,6 +122,8 @@ a {
   color: #383e41;
   background-color: #f3f6fa;
   border-radius: 0.3rem; }
+.main-content h1 code, .main-content h2 code, .main-content h3 code, .main-content h4 code, .main-content h5 code, .main-content h6 code {
+  font-size: inherit; }
 .main-content pre {
   padding: 0.8rem;
   margin-top: 0;
