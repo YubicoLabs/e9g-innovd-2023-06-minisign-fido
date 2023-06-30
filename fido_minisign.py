@@ -11,6 +11,7 @@ import sys
 from fido2.client import _Ctap2ClientAssertionSelection, _Ctap2ClientBackend, _user_keepalive, WindowsClient, UserInteraction
 from fido2.ctap import CtapError
 from fido2.ctap2 import Ctap2
+from fido2.ctap2.extensions import CredProtectExtension
 from fido2.ctap2.pin import ClientPin, PinProtocol
 from fido2.hid import CtapHidDevice
 from fido2.server import Fido2Server
@@ -106,7 +107,7 @@ class RawSignCtap2ClientBackend(_Ctap2ClientBackend):
     ):
         options = None
         exclude_list = None
-        extension_inputs = None
+        extension_inputs = {CredProtectExtension.NAME: 3} if user_verification else {}
         permissions = ClientPin.PERMISSION(0)
         on_keepalive = _user_keepalive(self.user_interaction)
         client_data_hash = sha256(client_data)
@@ -228,6 +229,7 @@ def make_minisig_signature(
         key_id: bytes,
         rp_id: str,
         credential_id: bytes,
+        user_verification: UserVerificationRequirement,
         file_hash: bytes,
         untrusted_comment: str = "",
         trusted_comment: str = "",
@@ -240,7 +242,7 @@ def make_minisig_signature(
         signature_client_data,
         rp_id,
         allow_credentials,
-        UserVerificationRequirement.DISCOURAGED,
+        user_verification,
         True,
     ).get_assertions()[0]
     signature = assertion.signature
@@ -251,7 +253,7 @@ def make_minisig_signature(
         global_signature_client_data,
         rp_id,
         allow_credentials,
-        UserVerificationRequirement.DISCOURAGED,
+        user_verification,
         False,
     ).get_assertions()[0]
     global_signature = global_assertion.signature
@@ -270,6 +272,7 @@ def generate_key(
         pubkey_outfile: str,
         prikey_outfile: str,
         rp_id: str,
+        user_verification: bool,
 ):
     if os.path.exists(pubkey_outfile):
         err_exit(f"File already exists: {pubkey_outfile}")
@@ -289,7 +292,6 @@ def generate_key(
     rp = {"id": rp_id, "name": ""}  # name is irrelevant for non-resident keys
     user = {"id": key_id, "name": key_id_base64, "displayName": key_id_base64}  # Irrelevant for non-resident keys
     key_params = [{"type": "public-key", "alg": -8}]  # minisign only supports Ed25519
-    user_verification = UserVerificationRequirement.DISCOURAGED
 
     client = get_client()
 
@@ -351,6 +353,11 @@ def sign_data(
         key_id,
         rp_id,
         credential_id,
+        (
+            UserVerificationRequirement.REQUIRED
+            if (AttestationObject(base64.b64decode(prikey_contents["fido"]["attestation_object"])).auth_data.extensions or {}).get("credProtect", None) == 3
+            else UserVerificationRequirement.DISCOURAGED
+        ),
         data_hash,
         untrusted_comment="signature from minisign FIDO key",
         trusted_comment=f"timestamp: {timestamp}\tfile:{file_name}\thashed",
@@ -394,9 +401,10 @@ USAGE:
 {sys.argv[0]} generate [--priout minisign.fidokey] [--pubout minisign.pub] [--rp-id minisign:]
 
   Options:
-    --priout   File to write private key handle to
-    --pubout   File to write public key to
-    --rp-id    FIDO RP ID to bind credential to
+    --priout             File to write private key handle to
+    --pubout             File to write public key to
+    --rp-id              FIDO RP ID to bind credential to
+    --verify-required    Require user verification (PIN or biometric) for every signature
 
 
 {sys.argv[0]} sign [<DATA_FILE>] [--key minisign.fidokey] [--sigout <DATA_FILE>.minisig]
@@ -422,6 +430,7 @@ def main(argv):
         pubkey_outfile: str = "minisign.pub"
         prikey_outfile: str = "minisign.fidokey"
         rp_id: str = "minisign:"
+        user_verification: bool = False
 
         argi = 2
         while argi < len(argv):
@@ -434,10 +443,13 @@ def main(argv):
             elif argv[argi] == "--rp-id":
                 rp_id = argv[argi+1]
                 argi += 2
+            elif argv[argi] == "--verify-required":
+                user_verification = True
+                argi += 1
             else:
                 usage_exit(f"Unknown option: {argv[argi]}")
 
-        generate_key(pubkey_outfile, prikey_outfile, rp_id)
+        generate_key(pubkey_outfile, prikey_outfile, rp_id, user_verification)
 
     elif cmd == "sign":
         data_file: Optional[str] = None
