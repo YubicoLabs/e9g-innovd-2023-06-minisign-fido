@@ -4,6 +4,7 @@ import base64
 import ctypes
 import datetime
 import json
+import nacl.hashlib
 import os
 import sys
 
@@ -166,7 +167,7 @@ class RawSignCtap2ClientBackend(_Ctap2ClientBackend):
         on_keepalive = _user_keepalive(self.user_interaction)
         event = None
 
-        client_data_hash = sha256(client_data)
+        client_data_hash = client_data
 
         pin_protocol, pin_token, pin_auth, internal_uv = self._get_auth_params(
             False, client_data_hash, rp_id, user_verification, permissions, event, on_keepalive
@@ -199,13 +200,16 @@ def get_client():
     return RawSignCtap2ClientBackend(dev, CliInteraction(), [])
 
 
-def blakehash(data_stream) -> bytes:
-    h = hashes.Hash(hashes.BLAKE2b(64), default_backend())
-    data = data_stream.read(1024)
-    while data:
-        h.update(data)
+def blakehash(data_stream, size=32) -> bytes:
+    h = nacl.hashlib.blake2b(digest_size=size)
+    if isinstance(data_stream, bytes):
+        h.update(data_stream)
+    else:
         data = data_stream.read(1024)
-    return h.finalize()
+        while data:
+            h.update(data)
+            data = data_stream.read(1024)
+    return h.digest()
 
 
 def make_minisig_pubkey(
@@ -244,7 +248,7 @@ def make_minisig_signature(
     signature = assertion.signature
     auth_data = assertion.auth_data
 
-    global_signature_client_data = signature + trusted_comment.encode('utf-8')
+    global_signature_client_data = blakehash(signature + trusted_comment.encode('utf-8'))
     global_assertion = client.do_get_assertion(
         global_signature_client_data,
         rp_id,

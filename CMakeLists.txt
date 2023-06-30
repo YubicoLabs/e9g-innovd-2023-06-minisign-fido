@@ -69,7 +69,7 @@ endif()
 
 target_include_directories(minisign PUBLIC ${SODIUM_INCLUDE_DIR})
 target_compile_options(minisign PUBLIC ${LIBSODIUM_CFLAGS} ${LIBSODIUM_CFLAGS_OTHER})
-target_link_libraries(minisign ${SODIUM_LIBRARY} ${LIBSODIUM_LDFLAGS_OTHER} /usr/lib/libcrypto.so)
+target_link_libraries(minisign ${SODIUM_LIBRARY} ${LIBSODIUM_LDFLAGS_OTHER})
 
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)

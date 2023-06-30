@@ -11,12 +11,13 @@
 #include <unistd.h>
 
 #include <sodium.h>
-#include <openssl/sha.h>
 
 #include "base64.h"
 #include "get_line.h"
 #include "helpers.h"
 #include "minisign.h"
+
+#define FIDO_DIGEST_BYTES 32
 
 #ifndef VERIFY_ONLY
 static const char *getopt_options = "CGSVRHhc:flm:oP:p:qQs:t:vWx:";
@@ -78,10 +79,15 @@ message_load_hashed(size_t *message_len, const char *message_file, int fido, Fid
     FILE                    *fp;
     size_t                   n;
 
+    const size_t digest_len = (
+      fido == 0
+        ? crypto_generichash_BYTES_MAX
+        : FIDO_DIGEST_BYTES);
+
     if ((fp = fopen(message_file, "rb")) == NULL) {
         exit_err(message_file);
     }
-    crypto_generichash_init(&hs, NULL, 0U, crypto_generichash_BYTES_MAX);
+    crypto_generichash_init(&hs, NULL, 0U, digest_len);
     while ((n = fread(buf, 1U, sizeof buf, fp)) > 0U) {
         crypto_generichash_update(&hs, buf, n);
     }
@@ -90,18 +96,14 @@ message_load_hashed(size_t *message_len, const char *message_file, int fido, Fid
     }
     xfclose(fp);
     if (fido == 0) {
-      message = xmalloc(crypto_generichash_BYTES_MAX);
-      crypto_generichash_final(&hs, message, crypto_generichash_BYTES_MAX);
-      *message_len = crypto_generichash_BYTES_MAX;
+      message = xmalloc(digest_len);
+      crypto_generichash_final(&hs, message, digest_len);
+      *message_len = digest_len;
     } else {
-      unsigned char *intermediate_message;
-      intermediate_message = xmalloc(crypto_generichash_BYTES_MAX);
-      crypto_generichash_final(&hs, intermediate_message, crypto_generichash_BYTES_MAX);
-
-      size_t msg_len = (sizeof *fido_sig_data_struct) + SHA256_DIGEST_LENGTH;
+      size_t msg_len = (sizeof *fido_sig_data_struct) + digest_len;
       message = xmalloc(msg_len);
       memcpy(message, fido_sig_data_struct, sizeof *fido_sig_data_struct);
-      SHA256(intermediate_message, crypto_generichash_BYTES_MAX, message + sizeof *fido_sig_data_struct);
+      crypto_generichash_final(&hs, message + sizeof *fido_sig_data_struct, digest_len);
       *message_len = msg_len;
     }
 
@@ -541,10 +543,11 @@ verify(PubkeyStruct *pubkey_struct, const char *message_file, const char *sig_fi
     memcpy(sig_and_trusted_comment + sizeof sig_struct->sig, trusted_comment, trusted_comment_len);
 
     if (fido == 1) {
-      size_t fido_signed_len = (sizeof *fido_global_sig_data_struct) + SHA256_DIGEST_LENGTH;
+      size_t fido_signed_len = (sizeof *fido_global_sig_data_struct) + FIDO_DIGEST_BYTES;
       unsigned char *tmp_buf = xmalloc(fido_signed_len);
       memcpy(tmp_buf, fido_global_sig_data_struct, sizeof *fido_global_sig_data_struct);
-      SHA256(sig_and_trusted_comment, global_sig_signed_len, tmp_buf + sizeof *fido_global_sig_data_struct);
+      crypto_generichash(tmp_buf + sizeof *fido_global_sig_data_struct, FIDO_DIGEST_BYTES,
+                         sig_and_trusted_comment, global_sig_signed_len, NULL, 0);
 
       free(sig_and_trusted_comment);
       sig_and_trusted_comment = tmp_buf;
