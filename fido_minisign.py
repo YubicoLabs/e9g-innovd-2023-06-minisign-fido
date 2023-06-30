@@ -8,8 +8,6 @@ import nacl.hashlib
 import os
 import sys
 
-from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives import hashes
 from fido2.client import _Ctap2ClientAssertionSelection, _Ctap2ClientBackend, _user_keepalive, WindowsClient, UserInteraction
 from fido2.ctap import CtapError
 from fido2.ctap2 import Ctap2
