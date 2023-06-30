@@ -242,14 +242,14 @@ base64(&lt;global_signature&gt; || &lt;auth_data_global&gt;)
         <code>key_id</code>: 8 random bytes, matching the public key
       </li>
       <li>
-        <code>signature</code>: <code>ed25519(auth_data || SHA256(Blake2b-512(&lt;file data&gt;)))</code>
+        <code>signature</code>: <code>ed25519(auth_data || Blake2b-256(&lt;file data&gt;))</code>
       </li>
       <li>
         <code>auth_data</code>: FIDO <a href="https://www.w3.org/TR/2021/REC-webauthn-2-20210408/#sctn-authenticator-data">
           authenticator data</a> for <code>signature</code>
       </li>
       <li>
-        <code>global_signature</code>: <code>ed25519(auth_data_global || SHA256(&lt;signature&gt; || &lt;trusted_comment&gt;))</code>
+        <code>global_signature</code>: <code>ed25519(auth_data_global || Blake2b-256(&lt;signature&gt; || &lt;trusted_comment&gt;))</code>
       </li>
       <li>
         <code>global_auth_data</code>: FIDO <a href="https://www.w3.org/TR/2021/REC-webauthn-2-20210408/#sctn-authenticator-data">
