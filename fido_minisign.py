@@ -389,7 +389,7 @@ def print_usage():
     print(f"""
 USAGE:
 
-{sys.argv[0]} generate [--priout minisign.key] [--pubout minisign.pub] [--rp-id minisign:]
+{sys.argv[0]} generate [--priout minisign.fidokey] [--pubout minisign.pub] [--rp-id minisign:]
 
   Options:
     --priout   File to write private key handle to
@@ -397,7 +397,7 @@ USAGE:
     --rp-id    FIDO RP ID to bind credential to
 
 
-{sys.argv[0]} sign [<DATA_FILE>] [--key minisign.key] [--sigout <DATA_FILE>.minisig]
+{sys.argv[0]} sign [<DATA_FILE>] [--key minisign.fidokey] [--sigout <DATA_FILE>.minisig]
 
   Arguments:
     DATA_FILE  File to sign. Omit or use "-" for standard input.
@@ -418,7 +418,7 @@ def main(argv):
 
     if cmd == "generate":
         pubkey_outfile: str = "minisign.pub"
-        prikey_outfile: str = "minisign.key"
+        prikey_outfile: str = "minisign.fidokey"
         rp_id: str = "minisign:"
 
         argi = 2
@@ -439,7 +439,7 @@ def main(argv):
 
     elif cmd == "sign":
         data_file: Optional[str] = None
-        prikey_file: str = "minisign.key"
+        prikey_file: str = "minisign.fidokey"
         sig_outfile: Optional[str] = None
 
         argi = 2
